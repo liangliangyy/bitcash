@@ -70,18 +70,20 @@ def calc_txid(tx_hex):
     return bytes_to_hex(double_sha256(hex_to_bytes(tx_hex))[::-1])
 
 
-def estimate_tx_fee(n_in, n_out, satoshis, compressed):
-
+def estimate_tx_fee(n_in, n_out, satoshis, compressed, message):
     if not satoshis:
         return 0
 
     estimated_size = (
-        n_in * (148 if compressed else 180)
-        + len(int_to_unknown_bytes(n_in, byteorder='little'))
-        + n_out * 34
-        + len(int_to_unknown_bytes(n_out, byteorder='little'))
-        + 8
+            n_in * (148 if compressed else 180)
+            + len(int_to_unknown_bytes(n_in, byteorder='little'))
+            + n_out * 34
+            + len(int_to_unknown_bytes(n_out, byteorder='little'))
+            + 8
     )
+
+    if message:
+        estimated_size = estimated_size - 34 + 8 + 1 + 1 + len(message)
 
     estimated_fee = estimated_size * satoshis
 
@@ -95,6 +97,7 @@ def sanitize_tx_data(unspents, outputs, fee, leftover, combine=True, message=Non
     sanitize_tx_data()
 
     fee is in satoshis per byte.
+    :type message: bytes
     """
 
     outputs = outputs.copy()
@@ -110,23 +113,27 @@ def sanitize_tx_data(unspents, outputs, fee, leftover, combine=True, message=Non
         raise ValueError('Transactions must have at least one unspent.')
 
     # Temporary storage so all outputs precede messages.
-    messages = []
+    if message is not None:
+        messages = [(message, 0)]
+    else:
+        messages = []
 
-    if message:
-        message_chunks = chunk_data(message.encode('utf-8'), MESSAGE_LIMIT)
-
-        for message in message_chunks:
-            messages.append((message, 0))
+    # if message:
+    #     message_chunks = chunk_data(message.encode('utf-8'), MESSAGE_LIMIT)
+    #
+    #     for message in message_chunks:
+    #         messages.append((message, 0))
 
     # Include return address in fee estimate.
 
     total_in = 0
+    total_out = 0
     num_outputs = len(outputs) + len(messages) + 1
     sum_outputs = sum(out[1] for out in outputs)
 
     if combine:
         # calculated_fee is in total satoshis.
-        calculated_fee = estimate_tx_fee(len(unspents), num_outputs, fee, compressed)
+        calculated_fee = estimate_tx_fee(len(unspents), num_outputs, fee, compressed, message)
         total_out = sum_outputs + calculated_fee
         unspents = unspents.copy()
         total_in += sum(unspent.amount for unspent in unspents)
@@ -138,7 +145,7 @@ def sanitize_tx_data(unspents, outputs, fee, leftover, combine=True, message=Non
 
         for index, unspent in enumerate(unspents):
             total_in += unspent.amount
-            calculated_fee = estimate_tx_fee(len(unspents[:index + 1]), num_outputs, fee, compressed)
+            calculated_fee = estimate_tx_fee(len(unspents[:index + 1]), num_outputs, fee, compressed, message)
             total_out = sum_outputs + calculated_fee
 
             if total_in >= total_out:
@@ -160,7 +167,6 @@ def sanitize_tx_data(unspents, outputs, fee, leftover, combine=True, message=Non
 
 
 def construct_output_block(outputs):
-
     output_block = b''
 
     for data in outputs:
@@ -176,37 +182,46 @@ def construct_output_block(outputs):
 
         # Blockchain storage
         else:
+            values_bytes = b''
+            split_length = 10
+            info = [dest[i:i + split_length] for i in range(0, len(dest), split_length)]
+            for message in info:
+                messagebytes = message.encode('utf-8')
+                len_message_bytes = len(messagebytes).to_bytes(1, byteorder='little')
+                _values = (len_message_bytes + messagebytes).hex()
+                values_bytes += bytes.fromhex(_values)
+
+            data_bytes = values_bytes
+
             script = (OP_RETURN +
-                      len(dest).to_bytes(1, byteorder='little') +
-                      dest)
+                      data_bytes)
 
             output_block += b'\x00\x00\x00\x00\x00\x00\x00\x00'
 
         output_block += int_to_unknown_bytes(len(script), byteorder='little')
+
         output_block += script
 
     return output_block
 
 
 def construct_input_block(inputs):
-
     input_block = b''
     sequence = SEQUENCE
 
     for txin in inputs:
         input_block += (
-            txin.txid +
-            txin.txindex +
-            txin.script_len +
-            txin.script +
-            sequence
+                txin.txid +
+                txin.txindex +
+                txin.script_len +
+                txin.script +
+                sequence
         )
 
     return input_block
 
 
 def create_p2pkh_transaction(private_key, unspents, outputs):
-
     public_key = private_key.public_key
     public_key_len = len(public_key).to_bytes(1, byteorder='little')
 
@@ -232,25 +247,25 @@ def create_p2pkh_transaction(private_key, unspents, outputs):
 
         inputs.append(TxIn(script, script_len, txid, txindex, amount))
 
-    hashPrevouts = double_sha256(b''.join([i.txid+i.txindex for i in inputs]))
+    hashPrevouts = double_sha256(b''.join([i.txid + i.txindex for i in inputs]))
     hashSequence = double_sha256(b''.join([SEQUENCE for i in inputs]))
     hashOutputs = double_sha256(output_block)
 
     # scriptCode_len is part of the script.
     for i, txin in enumerate(inputs):
         to_be_hashed = (
-            version +
-            hashPrevouts +
-            hashSequence +
-            txin.txid +
-            txin.txindex +
-            scriptCode_len +
-            scriptCode +
-            txin.amount +
-            SEQUENCE +
-            hashOutputs +
-            lock_time +
-            hash_type
+                version +
+                hashPrevouts +
+                hashSequence +
+                txin.txid +
+                txin.txindex +
+                scriptCode_len +
+                scriptCode +
+                txin.amount +
+                SEQUENCE +
+                hashOutputs +
+                lock_time +
+                hash_type
         )
         hashed = sha256(to_be_hashed)  # BIP-143: Used for Bitcoin Cash
 
@@ -258,10 +273,10 @@ def create_p2pkh_transaction(private_key, unspents, outputs):
         signature = private_key.sign(hashed) + b'\x41'
 
         script_sig = (
-            len(signature).to_bytes(1, byteorder='little') +
-            signature +
-            public_key_len +
-            public_key
+                len(signature).to_bytes(1, byteorder='little') +
+                signature +
+                public_key_len +
+                public_key
         )
 
         inputs[i].script = script_sig
