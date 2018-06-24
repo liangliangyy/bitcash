@@ -293,7 +293,7 @@ class PrivateKey(BaseKey):
 
         NetworkAPI.broadcast_tx(tx_hex)
 
-        return calc_txid(tx_hex)
+        return tx_hex,calc_txid(tx_hex)
 
     @classmethod
     def prepare_transaction(cls, address, outputs, compressed=True, fee=None, leftover=None,
